@@ -237,7 +237,79 @@ Only predictions above a predefined confidence threshold are accepted.
 ## MATLAB Code (Gesture Recognition → Robot Control)
 
 ```matlab
-PASTE YOUR MATLAB CODE HERE EXACTLY AS PROVIDED
+clear; clc;
+
+% --- 1. Settings ---
+arduinoPort = "COM7";  % <--- CHANGE THIS TO YOUR ARDUINO PORT!
+baudRate = 9600;
+
+% --- 2. Setup Arduino Connection ---
+disp(['Connecting to Arduino on ', arduinoPort, '...']);
+try
+    arduino = serialport(arduinoPort, baudRate);
+    configureTerminator(arduino, "CR/LF");
+    disp('Arduino Connected!');
+catch
+    error('Failed to connect. Check if Arduino is plugged in and COM port is correct.');
+end
+
+% --- 3. Load AI Model ---
+disp('Loading AI Model...');
+load('trained_gesture_net.mat');
+inputSize = netTrained.Layers(1).InputSize(1:2);
+cam = webcam();
+
+disp('------------------------------------------------');
+disp('  ROBOT CONTROL LIVE  ');
+disp('  Sending commands: F, L, R, S');
+disp('------------------------------------------------');
+
+figure('Name', 'Robot Controller');
+lastCommand = '';
+
+while true
+    % 1. Get Image
+    img = snapshot(cam);
+    imgResized = imresize(img, inputSize);
+
+    % 2. Predict
+    [label, scores] = classify(netTrained, imgResized);
+    confidence = max(scores);
+    gesture = char(label);
+
+    % 3. Send Command Logic
+    if confidence > 0.50
+        cmdToSend = '';
+
+        switch gesture
+            case 'forward'
+                cmdToSend = 'F';
+            case 'left'
+                cmdToSend = 'L';
+            case 'right'
+                cmdToSend = 'R';
+            case 'stop'
+                cmdToSend = 'S';
+        end
+
+        if ~strcmp(cmdToSend, lastCommand)
+            write(arduino, cmdToSend, "char");
+            lastCommand = cmdToSend;
+            disp(['Sent to Robot: ', cmdToSend]);
+        end
+    else
+        if ~strcmp(lastCommand, 'S')
+            write(arduino, 'S', "char");
+            lastCommand = 'S';
+            disp('Unsure - Stopping Robot');
+        end
+    end
+
+    % 4. Show Feed
+    imshow(img);
+    title(['Robot Action: ', gesture], 'FontSize', 18, 'Color', 'm');
+    drawnow;
+end
 ```
 
 ---
@@ -245,7 +317,48 @@ PASTE YOUR MATLAB CODE HERE EXACTLY AS PROVIDED
 ## ESP32 Code (Wi-Fi Command Forwarder)
 
 ```cpp
-PASTE YOUR ESP32 CODE HERE EXACTLY AS PROVIDED
+#include <WiFi.h>
+#include <WebServer.h>
+
+const char* ssid = "YOUR_WIFI_NAME";
+const char* password = "YOUR_WIFI_PASSWORD";
+
+WebServer server(80);
+
+#define RXD2 16
+#define TXD2 17
+
+void handleCmd() {
+  if (!server.hasArg("d")) {
+    server.send(400, "text/plain", "Missing command");
+    return;
+  }
+
+  char cmd = server.arg("d")[0];
+  Serial2.write(cmd);
+
+  server.send(200, "text/plain", "OK");
+}
+
+void setup() {
+  Serial.begin(115200);
+  Serial2.begin(9600, SERIAL_8N1, RXD2, TXD2);
+
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+  }
+
+  Serial.println("ESP32 IP:");
+  Serial.println(WiFi.localIP());
+
+  server.on("/cmd", handleCmd);
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();
+}
 ```
 
 ---
@@ -253,18 +366,199 @@ PASTE YOUR ESP32 CODE HERE EXACTLY AS PROVIDED
 ## Arduino Code (Obstacle Avoiding Car)
 
 ```cpp
-PASTE YOUR ARDUINO CODE HERE EXACTLY AS PROVIDED
+// =========================
+// OBSTACLE AVOIDING CAR
+// ARDUINO + HW-130 L293D SHIELD + HC-SR04 + SERVO
+// 4 DC MOTORS (M1–M4) + SERVO-MOUNTED ULTRASONIC
+// =========================
+
+#include <AFMotor.h>
+#include <Servo.h>
+
+// ---------- Ultrasonic pins ----------
+const int trigPin = A0;
+const int echoPin = A1;
+
+// ---------- Servo (sensor head) ----------
+const int servoPin = 9;
+Servo headServo;
+
+// Servo angles
+const int CENTER_ANGLE = 90;
+const int LEFT_ANGLE   = 150;
+const int RIGHT_ANGLE  = 30;
+
+// ---------- Motors ----------
+AF_DCMotor motorFL(1);
+AF_DCMotor motorRL(2);
+AF_DCMotor motorFR(3);
+AF_DCMotor motorRR(4);
+
+// ---------- Settings ----------
+const int baseSpeed    = 170;
+const int turnSpeed    = 170;
+const int stopDistance = 20;
+const int backTime     = 300;
+const int turnTime     = 350;
+
+// ================== HELPER FUNCTIONS ==================
+
+long getDistanceCM() {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  long duration = pulseIn(echoPin, HIGH, 30000UL);
+
+  if (duration == 0) {
+    return 300;
+  }
+
+  long distance = duration * 0.034 / 2;
+  return distance;
+}
+
+long getDistanceAtAngle(int angle) {
+  headServo.write(angle);
+  delay(300);
+  return getDistanceCM();
+}
+
+void setAllSpeeds(int s) {
+  motorFL.setSpeed(s);
+  motorRL.setSpeed(s);
+  motorFR.setSpeed(s);
+  motorRR.setSpeed(s);
+}
+
+void moveForward(int s) {
+  setAllSpeeds(s);
+  motorFL.run(FORWARD);
+  motorRL.run(FORWARD);
+  motorFR.run(FORWARD);
+  motorRR.run(FORWARD);
+}
+
+void moveBackward(int s) {
+  setAllSpeeds(s);
+  motorFL.run(BACKWARD);
+  motorRL.run(BACKWARD);
+  motorFR.run(BACKWARD);
+  motorRR.run(BACKWARD);
+}
+
+void turnLeft(int s) {
+  motorFL.setSpeed(0);
+  motorRL.setSpeed(0);
+  motorFL.run(RELEASE);
+  motorRL.run(RELEASE);
+
+  motorFR.setSpeed(s);
+  motorRR.setSpeed(s);
+  motorFR.run(FORWARD);
+  motorRR.run(FORWARD);
+}
+
+void turnRight(int s) {
+  motorFR.setSpeed(0);
+  motorRR.setSpeed(0);
+  motorFR.run(RELEASE);
+  motorRR.run(RELEASE);
+
+  motorFL.setSpeed(s);
+  motorRL.setSpeed(s);
+  motorFL.run(FORWARD);
+  motorRL.run(FORWARD);
+}
+
+void stopMotors() {
+  motorFL.setSpeed(0);
+  motorRL.setSpeed(0);
+  motorFR.setSpeed(0);
+  motorRR.setSpeed(0);
+
+  motorFL.run(RELEASE);
+  motorRL.run(RELEASE);
+  motorFR.run(RELEASE);
+  motorRR.run(RELEASE);
+}
+
+// ================== SETUP ==================
+
+void setup() {
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+
+  headServo.attach(servoPin);
+  headServo.write(CENTER_ANGLE);
+  delay(500);
+
+  Serial.begin(9600);
+
+  stopMotors();
+  delay(1000);
+}
+
+// ================== MAIN LOOP ==================
+
+void loop() {
+  long frontDist = getDistanceAtAngle(CENTER_ANGLE);
+
+  Serial.print("Front distance: ");
+  Serial.print(frontDist);
+  Serial.println(" cm");
+
+  if (frontDist > stopDistance) {
+    moveForward(baseSpeed);
+  } else {
+    stopMotors();
+    delay(200);
+
+    moveBackward(baseSpeed);
+    delay(backTime);
+
+    stopMotors();
+    delay(200);
+
+    long leftDist = getDistanceAtAngle(LEFT_ANGLE);
+    Serial.print("Left: ");
+    Serial.print(leftDist);
+    Serial.println(" cm");
+
+    long rightDist = getDistanceAtAngle(RIGHT_ANGLE);
+    Serial.print("Right: ");
+    Serial.print(rightDist);
+    Serial.println(" cm");
+
+    headServo.write(CENTER_ANGLE);
+
+    if (leftDist > rightDist) {
+      turnLeft(turnSpeed);
+    } else {
+      turnRight(turnSpeed);
+    }
+
+    delay(turnTime);
+    stopMotors();
+    delay(100);
+  }
+
+  delay(50);
+}
 ```
 
 ---
 
 # Results
 
-* Achieves autonomous navigation with obstacle avoidance.
-* Successfully follows recognized hand gestures.
-* AI-integrated gesture control provides intuitive interaction.
-* Sensor feedback improves stability and accuracy.
-* Maintains smooth speed control and navigation.
+- Achieves autonomous navigation with obstacle avoidance.
+- Successfully follows recognized hand gestures.
+- AI-integrated gesture control provides intuitive interaction.
+- Sensor feedback improves stability and accuracy.
+- Maintains smooth speed control and navigation.
 
 ---
 
@@ -272,27 +566,27 @@ PASTE YOUR ARDUINO CODE HERE EXACTLY AS PROVIDED
 
 The system effectively combines:
 
-* Artificial Intelligence
-* Physics-based motion control
-* Sensor intelligence
+- Artificial Intelligence
+- Physics-based motion control
+- Sensor intelligence
 
-Key outcomes:
+### Key Outcomes
 
-* Demonstrates a feasible low-cost smart cleaning solution.
-* Enables gesture-based interaction.
-* Uses feedback control for improved performance.
-* Provides an enhanced user experience.
+- Demonstrates a feasible low-cost smart cleaning solution.
+- Enables gesture-based interaction.
+- Uses feedback control for improved performance.
+- Provides an enhanced user experience.
 
 ---
 
 # Future Improvements
 
-* Full SLAM-based mapping
-* Mobile application integration
-* Voice assistant support
-* Advanced deep-learning gesture recognition
-* LiDAR-based navigation
-* Automatic charging dock
+- Full SLAM-based mapping
+- Mobile application integration
+- Voice assistant support
+- Advanced deep-learning gesture recognition
+- LiDAR-based navigation
+- Automatic charging dock
 
 ---
 
